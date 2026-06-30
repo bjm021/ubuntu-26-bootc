@@ -8,3 +8,5 @@ include:
       containerfile: $CI_PROJECT_DIR/Containerfile
       context: $CI_PROJECT_DIR
       image: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+      additional-images:
+        - $CI_REGISTRY_IMAGE:latest
