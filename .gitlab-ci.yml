@@ -1,0 +1,10 @@
+stages:
+  - build
+
+include:
+  - component: $CI_SERVER_FQDN/its/templates-and-utilities/gitlab-ci-components/build-container-image/build-container-image@3
+    inputs:
+      job-name: build bootc image
+      containerfile: $CI_PROJECT_DIR/Containerfile
+      context: $CI_PROJECT_DIR
+      image: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
