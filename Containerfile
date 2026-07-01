@@ -156,23 +156,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends cpio \
 
 # ostree's kernel discovery requires /usr/lib/modules/<kver>/vmlinuz and
 # initramfs.img.
-RUN set -o pipefail \
-    && KVER=$(ls /usr/lib/modules/) \
-    && cp /boot/vmlinuz-${KVER} /usr/lib/modules/${KVER}/vmlinuz \
-    && dracut --no-hostonly \
-              --force \
-              /usr/lib/modules/${KVER}/initramfs.img \
-              ${KVER} \
-    && EXTRA=$(mktemp -d) \
-    && chmod 755 "$EXTRA" \
-    && mkdir -p "$EXTRA/sbin" "$EXTRA/etc/systemd/system/initrd-switch-root.service.d" \
-    && install -m755 /usr/lib/dracut/modules.d/99bootc/ostree-prepare-root.sh \
-                     "$EXTRA/sbin/ostree-prepare-root.sh" \
-    && printf '[Service]\nExecStartPre=/sbin/ostree-prepare-root.sh\n' \
-         > "$EXTRA/etc/systemd/system/initrd-switch-root.service.d/10-ostree-prepare-root.conf" \
-    && (cd "$EXTRA" && find . -mindepth 1 | sort | cpio --create --format=newc --quiet | gzip -1) \
-         >> /usr/lib/modules/${KVER}/initramfs.img \
-    && rm -rf "$EXTRA"
+COPY build-initramfs.sh /usr/local/sbin/bootc-build-initramfs.sh
+RUN chmod +x /usr/local/sbin/bootc-build-initramfs.sh \
+    && /usr/local/sbin/bootc-build-initramfs.sh
+
+# The ostree-prepare-root hook above is spliced onto the end of the dracut
+# output as a raw second cpio archive, bypassing dracut's own (broken, see
+# above) module system entirely. dracut has no idea it's there. If any later
+# layer's apt transaction fires a kernel/initramfs dpkg trigger (e.g. a
+# keyboard/console package reconfiguring on top of plasma-desktop), a plain
+# `dracut`/`update-initramfs` re-run silently produces a "clean" image with
+# the hook gone and no error — and Ubuntu's default 0600 perms on that fresh
+# image also break bootc-image-builder's `lsinitrd` introspection step later.
+# Neuter both binaries so nothing downstream can regenerate this file by
+# accident. Child images that install a kernel module needed at early boot
+# (rare — most modules just need depmod + modprobe/udev after real root is
+# mounted, not a spot in the initramfs) can still rebuild it on purpose by
+# running /usr/local/sbin/bootc-build-initramfs.sh, which uses the real
+# dracut saved off below and re-applies the ostree hook every time.
+RUN dpkg-divert --local --rename --add /usr/bin/dracut \
+    && ln -sf /bin/true /usr/bin/dracut \
+    && if [ -e /usr/sbin/update-initramfs ]; then \
+           dpkg-divert --local --rename --add /usr/sbin/update-initramfs \
+           && ln -sf /bin/true /usr/sbin/update-initramfs; \
+       fi
 
 # skopeo (used by bootc's containers-image-proxy for imgstorage) requires
 # /etc/containers/policy.json — without it skopeo immediately exits ENOENT.

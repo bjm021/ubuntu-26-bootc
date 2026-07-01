@@ -53,10 +53,24 @@ Two other approaches were tried and ruled out before the current one:
 **What works**: a drop-in override on `initrd-switch-root.service` via
 `/etc/systemd/system/initrd-switch-root.service.d/10-ostree-prepare-root.conf`
 adding `ExecStartPre=/sbin/ostree-prepare-root.sh`. That unit is
-unconditionally started every boot. The `Containerfile` appends a small second
+unconditionally started every boot. `build-initramfs.sh` appends a small second
 cpio archive (script + drop-in) to the end of the dracut-generated
 `initramfs.img` — the Linux kernel natively supports concatenated cpio archives
 and merges them in order, avoiding a full extract-and-repack.
+
+Because dracut has no idea this second archive exists, any later `dracut` /
+`update-initramfs` run (e.g. a dpkg trigger fired by a package in a child
+image) would silently regenerate a "clean" `initramfs.img` with the hook gone
+— no error, just a system that no longer boots. The `Containerfile` guards
+against this by `dpkg-divert`-ing both binaries to no-ops right after the
+initramfs is built, so nothing downstream can regenerate it by accident.
+
+If a child image needs to add a kernel module that must be present at early
+boot (rare — most modules just need `depmod` plus `modprobe`/udev after the
+real root is mounted, not a spot in the initramfs), it can rebuild it on
+purpose by running `/usr/local/sbin/bootc-build-initramfs.sh`, which is left
+in the image, uses the real dracut binary saved off by the divert, and
+re-applies the ostree hook every time it runs.
 
 ## Other workarounds
 
