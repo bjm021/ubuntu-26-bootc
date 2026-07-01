@@ -12,8 +12,9 @@ support.
     Ubuntu's `libostree-dev`. The builder must be `ubuntu:26.04` (not a Rust
     base image) because Debian-based images ship an older ostree that bootc
     rejects.
-  - Stage 2: installs runtime deps (ostree, kernel, GRUB, systemd, podman),
-    copies in the compiled binaries, and applies the workarounds below.
+  - Stage 2: installs runtime deps (ostree, kernel, GRUB, systemd, podman,
+    NetworkManager), copies in the compiled binaries, and applies the
+    workarounds below.
 
 - **`10_blscfg.cfg`** — replacement for GRUB's `blscfg` module. Ubuntu's
   `grub-efi-amd64-bin` doesn't ship `blscfg.mod`, so this is a pure
@@ -88,6 +89,13 @@ re-applies the ostree hook every time it runs.
   since composefs may not be available in all kernels.
 - **`/etc/containers/policy.json`**: skopeo (used by bootc's image proxy) exits
   immediately without a policy file.
+- **`network-manager` + `iproute2`/`iputils-ping`, `NetworkManager.service`
+  enabled**: `podman build`/`podman run` get networking for free from the
+  container runtime, but a booted bootc image is a real OS on a real NIC with
+  no DHCP client, no `ip`/`ping`, and no DNS resolution otherwise.
+  NetworkManager auto-configures any interface not otherwise claimed (DHCP by
+  default, no config file needed) and is also what KDE's `plasma-nm` applet
+  expects in the downstream desktop image.
 
 ## Building
 

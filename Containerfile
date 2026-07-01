@@ -1,4 +1,4 @@
-# Ubuntu 26.04 bootc image — built from scratch, no community base needed.
+# Ubuntu 26.04 bootc image - built from scratch, no community base needed.
 #
 # Stage 1: compile bootc from source.
 # Use ubuntu:26.04 as builder so ostree matches the version bootc requires
@@ -54,8 +54,19 @@ RUN apt-get update && apt-get install -y \
         htop \
         vim \
         tmux \
+        iproute2 \
+        iputils-ping \
+        network-manager \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# podman/skopeo only ever ran inside the build container, which gets its
+# networking for free from the container runtime. A bootc image boots as a
+# real OS on real hardware/VM NICs - nothing brings the interface up or
+# resolves DNS unless something is enabled to do it. NetworkManager auto-
+# manages any interface not otherwise claimed (DHCP by default, no config
+# file needed) and is also what plasma-nm (KDE's network applet) expects.
+RUN systemctl enable NetworkManager
 
 # bootc-image-builder uses osbuild which hardcodes the Fedora/RHEL SELinux path
 # (etc/selinux/targeted/contexts/files/file_contexts) and crashes if it's absent.
@@ -86,7 +97,7 @@ RUN ln -sf /usr/bin/grub-editenv /usr/bin/grub2-editenv
 # (2) usr/lib/bootupd/updates/<component>.json in the deployment root.
 #
 # Use bootupd's newer /usr/lib/efi/<name>/<version>/EFI/ staging format (F44+).
-# That path avoids the RPM query that the ostree-boot path requires — bootupd
+# That path avoids the RPM query that the ostree-boot path requires - bootupd
 # derives name/version directly from the directory structure.  grub-mkimage builds
 # a self-contained grubx64.efi from Ubuntu's own GRUB modules.
 RUN GRUB_VER=$(dpkg-query -W -f='${Version}' grub-efi-amd64-bin) \
@@ -118,7 +129,7 @@ RUN mkdir -p /usr/lib/ostree \
 # /run/ostree-booted must exist on the live system so that bootc, ostree CLI,
 # and libostree recognise this as an ostree-booted deployment.  The real
 # ostree-prepare-root binary creates it, but our shell replacement runs in the
-# initramfs — and /run is a fresh tmpfs after switch_root, so anything written
+# initramfs - and /run is a fresh tmpfs after switch_root, so anything written
 # there is gone by the time the real system starts.  A tmpfiles.d snippet is
 # the correct place: systemd-tmpfiles-setup.service applies it early in every
 # boot from the real root.
@@ -128,13 +139,13 @@ RUN printf 'f /run/ostree-booted 0444 root root -\n' \
 # Ubuntu's ostree package does not ship ostree-prepare-root or any initramfs
 # hook.  Ubuntu 26.04's dracut (110-11) has a packaging bug: initramfs scripts
 # reference /lib/dracut-lib.sh which doesn't exist, so run_hookd() is never
-# defined and dracut's hook directories (pre-pivot, mount, etc.) are dead —
+# defined and dracut's hook directories (pre-pivot, mount, etc.) are dead -
 # stubbing the library back in is worse, since it makes dracut-mount actually
 # execute its standard mount hooks, which call emergency_shell() and hang.
 #
 # A standalone systemd service enabled via a target.wants/ symlink was also
 # tried and verified to be correctly placed in the initramfs (cpio contents
-# inspected directly), but systemd never picked it up — no "Starting" or
+# inspected directly), but systemd never picked it up - no "Starting" or
 # even a condition-skipped log line appeared for it, meaning the unit was
 # never entered into the boot transaction at all.
 #
@@ -146,7 +157,7 @@ RUN printf 'f /run/ostree-booted 0444 root root -\n' \
 # Strategy: build a standard dracut initramfs (which provides virtio drivers,
 # UUID-based root mounting, and systemd-in-initrd), then APPEND a second
 # cpio archive containing the script + the drop-in.  The Linux kernel
-# supports multiple concatenated cpio archives and merges them in order —
+# supports multiple concatenated cpio archives and merges them in order -
 # this avoids extracting and repacking the entire initramfs.
 COPY ostree-pivot.sh /usr/lib/dracut/modules.d/99bootc/ostree-prepare-root.sh
 RUN chmod +x /usr/lib/dracut/modules.d/99bootc/ostree-prepare-root.sh
@@ -166,11 +177,11 @@ RUN chmod +x /usr/local/sbin/bootc-build-initramfs.sh \
 # layer's apt transaction fires a kernel/initramfs dpkg trigger (e.g. a
 # keyboard/console package reconfiguring on top of plasma-desktop), a plain
 # `dracut`/`update-initramfs` re-run silently produces a "clean" image with
-# the hook gone and no error — and Ubuntu's default 0600 perms on that fresh
+# the hook gone and no error - and Ubuntu's default 0600 perms on that fresh
 # image also break bootc-image-builder's `lsinitrd` introspection step later.
 # Neuter both binaries so nothing downstream can regenerate this file by
 # accident. Child images that install a kernel module needed at early boot
-# (rare — most modules just need depmod + modprobe/udev after real root is
+# (rare - most modules just need depmod + modprobe/udev after real root is
 # mounted, not a spot in the initramfs) can still rebuild it on purpose by
 # running /usr/local/sbin/bootc-build-initramfs.sh, which uses the real
 # dracut saved off below and re-applies the ostree hook every time.
@@ -182,7 +193,7 @@ RUN dpkg-divert --local --rename --add /usr/bin/dracut \
        fi
 
 # skopeo (used by bootc's containers-image-proxy for imgstorage) requires
-# /etc/containers/policy.json — without it skopeo immediately exits ENOENT.
+# /etc/containers/policy.json - without it skopeo immediately exits ENOENT.
 # Also provide registries.conf so it knows where to search for images.
 RUN mkdir -p /etc/containers \
     && printf '{"default":[{"type":"insecureAcceptAnything"}]}\n' \
@@ -192,7 +203,7 @@ RUN mkdir -p /etc/containers \
     && printf '[storage]\ndriver = "vfs"\nrunroot = "/run/containers/storage"\ngraphroot = "/var/lib/containers/storage"\n' \
          > /etc/containers/storage.conf
 
-# Mark this as a bootc image — bootc-image-builder refuses to process images
+# Mark this as a bootc image - bootc-image-builder refuses to process images
 # without this label.
 LABEL containers.bootc=1
 
