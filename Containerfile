@@ -66,6 +66,30 @@ RUN apt-get update && apt-get install -y \
 # resolves DNS unless something is enabled to do it. NetworkManager auto-
 # manages any interface not otherwise claimed (DHCP by default, no config
 # file needed) and is also what plasma-nm (KDE's network applet) expects.
+#
+# Ubuntu's network-manager package ships two separate mechanisms that both
+# leave a plain ethernet device unmanaged, and both had to be overridden
+# (confirmed via nmcli + `NetworkManager --print-config` on a live boot):
+#
+# 1. NetworkManager.conf: plugins=ifupdown,keyfile. The ifupdown plugin's
+#    "managed" setting only controls devices *listed* in
+#    /etc/network/interfaces - it does nothing for devices that aren't
+#    listed there at all, which is every device in this image (no
+#    netplan/cloud-init ever writes that file here). Fix: drop ifupdown and
+#    use keyfile only.
+# 2. /usr/lib/NetworkManager/conf.d/10-globally-managed-devices.conf ships
+#    [keyfile] unmanaged-devices=*,except:type:wifi,except:type:gsm,
+#    except:type:cdma - i.e. plain ethernet is excluded from keyfile
+#    management too. Stock Ubuntu Desktop never hits either of these because
+#    netplan writes a matching connection profile plus a runtime override
+#    clearing this list; this image has neither. Fix: blank the list so
+#    keyfile manages everything, matching what netplan would otherwise do.
+#
+# With both cleared, NM's default policy (auto-manage + auto-DHCP any wired
+# device with no existing profile) applies with no further config needed.
+RUN mkdir -p /etc/NetworkManager/conf.d \
+    && printf '[main]\nplugins=keyfile\n\n[keyfile]\nunmanaged-devices=\n' \
+         > /etc/NetworkManager/conf.d/10-plugins.conf
 RUN systemctl enable NetworkManager
 
 # bootc-image-builder uses osbuild which hardcodes the Fedora/RHEL SELinux path
@@ -227,3 +251,8 @@ RUN apt-get update && apt-get install -y \
         libefivar-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# DEBUG: add testuser:test with passwordless sudo access for testing.  Remove in production.
+RUN useradd -m -s /bin/bash testuser \
+    && echo 'testuser ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+RUN echo 'testuser:test' | chpasswd
