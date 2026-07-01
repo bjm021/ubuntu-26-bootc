@@ -20,6 +20,7 @@ OSTREE=$(getarg ostree=) || { log "no ostree= arg, skipping"; exit 0; }
 [ -n "$OSTREE" ] || { log "ostree= is empty, skipping"; exit 0; }
 
 SYSROOT=/sysroot
+STAGING=/sysroot.tmp
 [ -d "$SYSROOT/ostree" ] || { err "no /sysroot/ostree — sysroot not mounted?"; exit 1; }
 
 log "activating $OSTREE"
@@ -37,24 +38,65 @@ OSNAME=$(printf '%s' "$DEPLOY" | sed 's|.*/ostree/deploy/\([^/]*\)/deploy/.*|\1|
 VAR_SRC="${SYSROOT}/ostree/deploy/${OSNAME}/var"
 log "osname=$OSNAME var=$VAR_SRC"
 
-# Mount var at /sysroot/var BEFORE the deployment bind-mount shadows
-# the ostree directory tree. The mount persists after /sysroot is replaced.
-mkdir -p "${SYSROOT}/var"
+# Avoid "cannot move a shared mount" failures below (same reason real
+# ostree-prepare-root does this: Documentation/filesystems/sharedsubtree.txt).
+mount --make-rprivate / 2>/dev/null || true
+
+# Assemble the new root at a staging mountpoint instead of bind-mounting the
+# deployment straight onto $SYSROOT. $SYSROOT is also where the physical
+# partition — and therefore $VAR_SRC, which lives under $SYSROOT/ostree/... —
+# is reachable from; bind-mounting the deployment directly over $SYSROOT
+# would shadow that path before the var bind-mount below could use it.
+mkdir -p "$STAGING"
+if ! mount --bind "$DEPLOY" "$STAGING"; then
+    err "deployment bind-mount FAILED"
+    exit 1
+fi
+
+# /etc: same technique real ostree-prepare-root uses — bind-mount it onto
+# itself so it becomes its own independent mount, immune to the read-only
+# remount applied to /usr below.
+if mount --bind "$STAGING/etc" "$STAGING/etc" \
+    && mount -o remount,bind "$STAGING/etc"; then
+    log "etc is independently writable"
+else
+    err "etc bind-mount failed (continuing)"
+fi
+
+# /usr: the actual read-only protection, Fedora/CoreOS-style. Ubuntu is
+# usr-merged, so /bin, /sbin, /lib, /lib64 are symlinks into /usr — locking
+# down this one directory covers effectively the whole OS payload.
+if mount --bind "$STAGING/usr" "$STAGING/usr" \
+    && mount -o remount,bind,ro "$STAGING/usr"; then
+    log "usr is read-only"
+else
+    err "usr readonly remount failed (continuing)"
+fi
+
+# /var: bind-mount the persistent stateroot directory. This has to happen
+# before the move below, while $SYSROOT (not yet replaced) still gives us a
+# path to $VAR_SRC.
+mkdir -p "$STAGING/var"
 if [ -d "$VAR_SRC" ]; then
-    if mount --bind "$VAR_SRC" "${SYSROOT}/var"; then
+    if mount --bind "$VAR_SRC" "$STAGING/var"; then
         log "var mounted"
     else
         err "var bind-mount failed (continuing)"
     fi
+else
+    err "var source $VAR_SRC missing (continuing)"
 fi
 
-# Activate the deployment: bind-mount it over /sysroot.
-if mount --bind "$DEPLOY" "$SYSROOT"; then
+# Move the fully-assembled staging tree onto /sysroot in one atomic step.
+# This replaces $SYSROOT (and everything reachable through it) with the
+# deployment, carrying the etc/usr/var submounts set up above along with it.
+if mount --move "$STAGING" "$SYSROOT"; then
     log "deployment activated"
 else
-    err "deployment bind-mount FAILED"
+    err "deployment move FAILED"
     exit 1
 fi
+rmdir "$STAGING" 2>/dev/null
 
 log "done"
 exit 0

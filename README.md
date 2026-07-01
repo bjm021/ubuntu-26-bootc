@@ -1,4 +1,4 @@
-# ubuntu-26-bootc
+# bootc/ubuntu-26
 
 A [bootc](https://github.com/bootc-dev/bootc) image built on **Ubuntu 26.04**,
 assembled from scratch. No community Ubuntu bootc base image exists yet, so
@@ -25,11 +25,28 @@ support.
 
 - **`ostree-pivot.sh`** — pure POSIX shell pivot script run inside the
   initramfs. Ubuntu's `ostree` package doesn't ship the `ostree-prepare-root`
-  binary that real ostree-based distros provide, so this replaces it. It reads
-  `ostree=` from the kernel command line, resolves the deployment symlink under
-  `/sysroot`, bind-mounts persistent `/var`, and bind-mounts the deployment
-  directory over `/sysroot` so `initrd-switch-root.service` pivots into the
-  correct ostree root. Progress is logged to `/dev/kmsg`.
+  binary that real ostree-based distros provide, so this replaces it,
+  following the same staged-mount approach as upstream's
+  `src/switchroot/ostree-prepare-root.c` (verified against its source). It
+  reads `ostree=` from the kernel command line, resolves the deployment
+  symlink under `/sysroot`, then assembles the new root at a temporary
+  `/sysroot.tmp` mountpoint: bind-mounts the deployment there, bind-mounts
+  `/etc` onto itself (writable) and `/usr` onto itself then remounts it
+  read-only — Ubuntu is usr-merged, so this one directory covers effectively
+  the whole OS payload, same as Fedora/CoreOS — and bind-mounts the
+  persistent stateroot `/var` in. Only once all of that is assembled does it
+  `mount --move` the staging tree onto `/sysroot` so
+  `initrd-switch-root.service` pivots into the correct, now-immutable ostree
+  root. Progress is logged to `/dev/kmsg`.
+
+  The staging step matters: an earlier version bind-mounted the deployment
+  directly over `/sysroot`, and separately bind-mounted persistent `/var`
+  onto `/sysroot/var` beforehand. Confirmed via an `unshare --mount` sandbox
+  test that this ordering silently shadows the `/var` bind-mount once the
+  deployment lands on top of it — `/var` would reset to the deployment's own
+  empty directory on every boot instead of persisting. Assembling everything
+  at a separate mountpoint first and moving it into place atomically (what
+  upstream does) avoids this.
 
 ## Why the initramfs needs patching
 
@@ -116,16 +133,28 @@ podman build -t ubuntu-26-bootc .
 
 ## Converting to a disk image
 
-Requires rootful podman (bootc-image-builder uses rootful storage internally):
+Requires rootful podman (bootc-image-builder uses rootful storage internally).
+
+The default 10GiB root partition is too small for this image — the unpacked
+content plus podman's own imgstorage copy runs past the free-space margin
+ostree requires — so request a larger one via a disk customization config:
 
 ```sh
+cat > /tmp/bootc-builder-config.toml << 'EOF'
+[[customizations.filesystem]]
+mountpoint = "/"
+minsize = 21474836480
+EOF
+
 sudo podman run --rm \
     --privileged \
     --pull=newer \
     -v /var/lib/containers/storage:/var/lib/containers/storage \
     -v "$PWD/output:/output" \
+    -v /tmp/bootc-builder-config.toml:/config.toml \
     quay.io/centos-bootc/bootc-image-builder:latest \
     --type qcow2 \
+    --config /config.toml \
     --local \
     ubuntu-26-bootc
 # disk image is written to ./output/qcow2/disk.qcow2
