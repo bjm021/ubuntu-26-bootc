@@ -21,7 +21,7 @@ KVER=$(ls /usr/lib/modules/)
 depmod "$KVER"
 cp -f "/boot/vmlinuz-${KVER}" "/usr/lib/modules/${KVER}/vmlinuz"
 
-"$DRACUT" --no-hostonly --force "/usr/lib/modules/${KVER}/initramfs.img" "$KVER"
+"$DRACUT" --no-hostonly --force --add-drivers "btrfs" "/usr/lib/modules/${KVER}/initramfs.img" "$KVER"
 
 EXTRA=$(mktemp -d)
 chmod 755 "$EXTRA"

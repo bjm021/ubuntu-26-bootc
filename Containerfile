@@ -191,6 +191,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends cpio \
 
 # ostree's kernel discovery requires /usr/lib/modules/<kver>/vmlinuz and
 # initramfs.img.
+RUN echo 'force_drivers+=" btrfs "' > /etc/dracut.conf.d/btrfs.conf
+
 COPY build-initramfs.sh /usr/local/sbin/bootc-build-initramfs.sh
 RUN chmod +x /usr/local/sbin/bootc-build-initramfs.sh \
     && /usr/local/sbin/bootc-build-initramfs.sh
