@@ -17,11 +17,14 @@ support.
 
 - **`10_blscfg.cfg`** — replacement for GRUB's `blscfg` module. Ubuntu's
   `grub-efi-amd64-bin` doesn't ship `blscfg.mod`, so this is a pure
-  GRUB-script reimplementation: it reads the BLS entry at
-  `/loader/entries/ostree-1.conf`, extracts the deployment hash and kernel
-  version, and constructs the boot `menuentry` by hand. It is installed into
-  bootupd's static GRUB config snippets directory, which bootupd concatenates
-  into the final `grub.cfg` at install time.
+  GRUB-script reimplementation. After `bootc upgrade`, ostree writes two BLS
+  entries: `ostree-2.conf` (pending/new deployment) and `ostree-1.conf`
+  (rollback/current). The script prefers `ostree-2.conf` when present so the
+  next boot activates the new deployment, falling back to `ostree-1.conf`
+  otherwise. The hash regexp matches any serial number (`/[0-9]+` not the
+  hardcoded `/0`) because the serial increments with each upgrade. It is
+  installed into bootupd's static GRUB config snippets directory, which
+  bootupd concatenates into the final `grub.cfg` at install time.
 
 - **`ostree-pivot.sh`** — pure POSIX shell pivot script run inside the
   initramfs. Ubuntu's `ostree` package doesn't ship the `ostree-prepare-root`
@@ -101,8 +104,8 @@ re-applies the ostree hook every time it runs.
   exist at build time so `setfiles` doesn't crash. `selinux-policy-default` is
   installed and aliased to the `targeted` path osbuild expects.
 - **`/usr/lib/ostree/prepare-root.conf`**: Ubuntu's `ostree` package doesn't
-  ship one; `bootc install` requires it. `composefs` is set to `enabled=maybe`
-  since composefs may not be available in all kernels.
+  ship one; `bootc install` requires it. `composefs` is set to `enabled=no`
+  to skip EROFS image generation (faster deployment checkout).
 - **`/etc/containers/policy.json`**: skopeo (used by bootc's image proxy) exits
   immediately without a policy file.
 - **`network-manager` + `/etc/NetworkManager/conf.d/10-plugins.conf`**:
@@ -124,6 +127,58 @@ re-applies the ostree hook every time it runs.
   (`plugins=keyfile`) and blanks `unmanaged-devices=`. With both cleared,
   NM's default policy (auto-manage + auto-DHCP any wired device with no
   existing profile) takes over with no further config needed.
+
+- **`bubblewrap`**: installed explicitly because Ubuntu's image carries SELinux
+  policy files (from `selinux-policy-default`, needed by `bootc-image-builder`).
+  `ostree admin finalize-staged` detects these and calls `/usr/bin/bwrap` for
+  the SELinux relabeling step even when SELinux is `Disabled`. Without the
+  package the finalize-staged run fails with a `bwrap: No such file` error.
+
+- **`ostree-finalize-staged.service`**: Ubuntu's `ostree` package doesn't ship
+  this unit; without it `bootc upgrade` exits with code 5. Three interlocking
+  issues required workarounds:
+  1. *Lock deadlock*: libostree holds the sysroot lock while calling
+     `systemctl start ostree-finalize-staged` synchronously. Our
+     `finalize-staged` also needs that lock. Fix: the service wrapper detects
+     `bootc` via `pgrep`, exits 0 immediately (releasing the systemctl call),
+     and hands off the actual work to a background helper.
+  2. *`--apply` race*: `bootc upgrade --apply` triggers a reboot right after
+     the service exits, killing the background helper before it can complete.
+     Fix: the helper is wrapped in `systemd-inhibit --mode=delay` so the
+     reboot is postponed until `ostree admin finalize-staged` finishes.
+  3. *Lock still held at reboot*: bootc holds the sysroot lock while blocking
+     on `systemctl reboot`, preventing finalize-staged from acquiring it. Fix:
+     bootc is patched at build time (the source is compiled from scratch) to
+     call `sysroot.unlock()` before the reboot call inside `async fn upgrade`.
+
+- **`InhibitDelayMaxSec=120`** in `/etc/systemd/logind.conf.d/inhibit-delay.conf`:
+  raises systemd-logind's shutdown delay cap from the default 5 s to 120 s so
+  the inhibitor held by the finalize-staged helper has enough time to complete
+  before the reboot proceeds.
+
+## OTA updates (`bootc upgrade`)
+
+`bootc upgrade` and `bootc upgrade --check` work on a running system. The image
+is pulled from whatever registry was used at install time (recorded in
+`/sysroot/ostree/deploy/default/deploy/*.origin`).
+
+**Registry must be HTTPS in production.** The image's `/etc/containers/registries.conf`
+only lists `docker.io` as an unqualified search registry. If you're pulling from
+a plain-HTTP dev registry (e.g. the local one started by `make registry-start`),
+you need to add an insecure entry on each deployed machine:
+
+```sh
+cat >> /etc/containers/registries.conf << 'EOF'
+
+[[registry]]
+location = "192.168.1.15:5000"
+insecure = true
+EOF
+```
+
+Do **not** bake this into the image — in production the registry should terminate
+TLS, and an `insecure = true` entry in the shipped image would silently bypass
+certificate validation for anyone using that address.
 
 ## Building
 

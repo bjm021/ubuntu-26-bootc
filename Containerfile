@@ -22,6 +22,31 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN git clone https://github.com/bootc-dev/bootc.git /bootc
 WORKDIR /bootc
+# Release the sysroot lock before triggering reboot so ostree finalize-staged
+# can acquire it. With --apply, bootc holds the lock while blocking on
+# systemctl reboot (delayed by our shutdown inhibitor), preventing finalize-staged
+# from writing BLS entries. An explicit sysroot.unlock() before reboot() breaks
+# the deadlock. SysrootLock::drop() calls unlock() again but libostree's
+# lock_acquired flag makes the second call a no-op.
+RUN printf 'import re\n\
+src = open("crates/lib/src/cli.rs").read()\n\
+target = "crate::reboot::reboot()?;"\n\
+repl = "if let Ok(ol) = storage.get_ostree() { ol.sysroot.unlock(); } " + target\n\
+m = re.search(r"async fn upgrade\\b", src)\n\
+assert m, "upgrade fn not found in crates/lib/src/cli.rs"\n\
+brace = src.index("{", m.start())\n\
+d, i = 0, brace\n\
+while i < len(src):\n\
+    c = src[i]\n\
+    if c == "{": d += 1\n\
+    elif c == "}": d -= 1\n\
+    if d == 0: break\n\
+    i += 1\n\
+fn_body = src[m.start():i+1]\n\
+assert target in fn_body, "crate::reboot::reboot()? not found in upgrade()"\n\
+patched = src[:m.start()] + fn_body.replace(target, repl) + src[i+1:]\n\
+open("crates/lib/src/cli.rs", "w").write(patched)\n' \
+    > /tmp/patch_bootc.py && python3 /tmp/patch_bootc.py
 RUN cargo build --release
 
 # bootupd manages the EFI boot partition on ostree-based systems.
@@ -57,6 +82,7 @@ RUN apt-get update && apt-get install -y \
         iproute2 \
         iputils-ping \
         network-manager \
+        bubblewrap \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -145,10 +171,15 @@ RUN GRUB_VER=$(dpkg-query -W -f='${Version}' grub-efi-amd64-bin) \
 # existing directory is a no-op and won't hit the EPERM.
 RUN mkdir -p /sysroot
 
+# libostree opens ostree/lock and ostree/repo relative to / (the sysroot root
+# fd), not via /sysroot. ostree-pivot.sh bind-mounts the physical root's
+# ostree/ directory here so /ostree/ is accessible after switch_root.
+RUN mkdir -p /ostree
+
 # bootc install checks for ostree/prepare-root.conf; Ubuntu's ostree package
 # doesn't ship it, so create a minimal one manually.
 RUN mkdir -p /usr/lib/ostree \
-    && printf '[composefs]\nenabled=maybe\n' > /usr/lib/ostree/prepare-root.conf
+    && printf '[composefs]\nenabled=no\n' > /usr/lib/ostree/prepare-root.conf
 
 # /run/ostree-booted must exist on the live system so that bootc, ostree CLI,
 # and libostree recognise this as an ostree-booted deployment.  The real
@@ -159,6 +190,73 @@ RUN mkdir -p /usr/lib/ostree \
 # boot from the real root.
 RUN printf 'f /run/ostree-booted 0444 root root -\n' \
       > /usr/lib/tmpfiles.d/ostree-booted.conf
+
+# Ubuntu's ostree package does not ship ostree-remount or ostree-remount.service.
+# After switch_root the physical root (containing the ostree repo) is no longer
+# mounted anywhere, so bootc status/upgrade fail with ENOENT trying to open
+# /sysroot/ostree/repo.  Add a minimal service that re-mounts it from the
+# root=UUID= and rootflags= parameters on the kernel command line.
+#
+# The service also remounts /boot rw and bind-mounts it at /sysroot/boot.
+# bootc-image-builder creates a separate boot partition (ext4), mounted ro from
+# fstab. ostree admin finalize-staged (using the auto-detected sysroot /)
+# writes new BLS entries to /boot/loader/entries/ and copies kernel/initrd to
+# /boot/ostree/. /boot must be rw for this to succeed.
+RUN printf '#!/bin/sh\nset -e\n\
+CMDLINE=$(cat /proc/cmdline)\n\
+ROOT_UUID=$(echo "$CMDLINE" | tr " " "\\n" | grep "^root=UUID=" | cut -d= -f3)\n\
+ROOTFLAGS=$(echo "$CMDLINE" | tr " " "\\n" | grep "^rootflags=" | cut -d= -f2-)\n\
+test -n "$ROOT_UUID" || exit 0\n\
+if test -n "$ROOTFLAGS"; then\n\
+    mount -o "$ROOTFLAGS" "UUID=$ROOT_UUID" /sysroot\n\
+else\n\
+    mount "UUID=$ROOT_UUID" /sysroot\n\
+fi\n\
+touch /sysroot/.ostree-sysroot\n\
+mount --bind /sysroot/ostree /ostree\n\
+if findmnt /boot > /dev/null 2>&1; then\n\
+    mount -o remount,rw /boot 2>/dev/null || true\n\
+    mount --bind /boot /sysroot/boot 2>/dev/null || true\n\
+fi\n' > /usr/lib/bootc-sysroot-mount.sh \
+    && chmod +x /usr/lib/bootc-sysroot-mount.sh
+RUN printf '[Unit]\nDescription=Remount physical root at /sysroot for bootc\nDefaultDependencies=no\nAfter=local-fs.target\nBefore=sysinit.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/lib/bootc-sysroot-mount.sh\n\n[Install]\nWantedBy=sysinit.target\n' \
+      > /usr/lib/systemd/system/bootc-sysroot-mount.service \
+    && systemctl enable bootc-sysroot-mount.service
+
+# Ubuntu's ostree package does not ship ostree-finalize-staged.service.
+# bootc upgrade stages the new deployment then immediately calls
+# `systemctl start ostree-finalize-staged.service` to finalize the BLS entries
+# (write the new loader stanza so the next reboot boots the staged image).
+# Without the unit the call returns exit code 5 and the upgrade fails.
+#
+# Two interlocking issues:
+# 1. libostree holds the sysroot lock while calling systemctl start synchronously;
+#    our finalize-staged also needs that lock → deadlock.  Fix: the wrapper exits 0
+#    immediately (unblocking bootc), and a background helper finishes the work once
+#    bootc exits and releases the lock.
+# 2. `bootc upgrade --apply` triggers a reboot right after finalize-staged exits,
+#    killing the background helper before it completes.  Fix: hold a systemd
+#    shutdown delay-inhibitor so the reboot waits for the helper to finish.
+#    InhibitDelayMaxSec (below) is raised to 120 s to allow enough time.
+RUN mkdir -p /etc/systemd/logind.conf.d \
+    && printf '[Login]\nInhibitDelayMaxSec=120\n' \
+         > /etc/systemd/logind.conf.d/inhibit-delay.conf
+RUN printf '#!/bin/sh\n\
+if pgrep -x bootc > /dev/null 2>&1; then\n\
+    systemd-inhibit --what=shutdown --who=ostree-finalize-staged --why=finalize-staged --mode=delay /usr/lib/bootc-finalize-wait.sh &\n\
+    exit 0\n\
+fi\n\
+exec /usr/bin/ostree admin finalize-staged\n' \
+    > /usr/lib/bootc-finalize-staged.sh \
+    && chmod +x /usr/lib/bootc-finalize-staged.sh
+RUN printf '#!/bin/sh\n\
+sleep 5\n\
+exec /usr/bin/ostree admin finalize-staged\n' \
+    > /usr/lib/bootc-finalize-wait.sh \
+    && chmod +x /usr/lib/bootc-finalize-wait.sh
+RUN printf '[Unit]\nDescription=OSTree Finalize Staged Deployment\nConditionKernelCommandLine=ostree\nDefaultDependencies=no\nRequires=bootc-sysroot-mount.service\nAfter=bootc-sysroot-mount.service\nBefore=reboot.target poweroff.target halt.target\n\n[Service]\nType=oneshot\nKillMode=process\nExecStart=/usr/lib/bootc-finalize-staged.sh\n\n[Install]\nWantedBy=multi-user.target\n' \
+      > /usr/lib/systemd/system/ostree-finalize-staged.service \
+    && systemctl enable ostree-finalize-staged.service
 
 # Ubuntu's ostree package does not ship ostree-prepare-root or any initramfs
 # hook.  Ubuntu 26.04's dracut (110-11) has a packaging bug: initramfs scripts
@@ -191,7 +289,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends cpio \
 
 # ostree's kernel discovery requires /usr/lib/modules/<kver>/vmlinuz and
 # initramfs.img.
-RUN echo 'force_drivers+=" btrfs "' > /etc/dracut.conf.d/btrfs.conf
+RUN echo 'force_drivers+=" btrfs erofs "' > /etc/dracut.conf.d/btrfs.conf
 
 COPY build-initramfs.sh /usr/local/sbin/bootc-build-initramfs.sh
 RUN chmod +x /usr/local/sbin/bootc-build-initramfs.sh \

@@ -42,15 +42,46 @@ log "osname=$OSNAME var=$VAR_SRC"
 # ostree-prepare-root does this: Documentation/filesystems/sharedsubtree.txt).
 mount --make-rprivate / 2>/dev/null || true
 
-# Assemble the new root at a staging mountpoint instead of bind-mounting the
-# deployment straight onto $SYSROOT. $SYSROOT is also where the physical
-# partition — and therefore $VAR_SRC, which lives under $SYSROOT/ostree/... —
-# is reachable from; bind-mounting the deployment directly over $SYSROOT
-# would shadow that path before the var bind-mount below could use it.
-mkdir -p "$STAGING"
-if ! mount --bind "$DEPLOY" "$STAGING"; then
-    err "deployment bind-mount FAILED"
-    exit 1
+# Assemble the new root at a staging mountpoint.  Prefer composefs (erofs
+# image + overlay) when the deployment was checked out with enabled=yes;
+# that skips the per-file hardlink step that makes `:: Deploying` slow.
+# Fall back to a plain bind-mount if the .cfs file is absent or if any
+# kernel primitive (erofs, loop, overlay data-only lower) is unavailable.
+DEPLOY_CFS="${DEPLOY}/.ostree.cfs"
+COMPOSEFS_MOUNTED=0
+if [ -f "$DEPLOY_CFS" ]; then
+    modprobe loop  2>/dev/null || true
+    modprobe erofs 2>/dev/null || true
+    if grep -q erofs /proc/filesystems 2>/dev/null; then
+        CFS_MNT="/tmp/cfs$$"
+        mkdir -p "$STAGING" "$CFS_MNT"
+        if mount -t erofs -o loop,ro "$DEPLOY_CFS" "$CFS_MNT" 2>/dev/null; then
+            OBJECTS="${SYSROOT}/ostree/repo/objects"
+            if mount -t overlay overlay \
+               -o "lowerdir=${CFS_MNT}::${OBJECTS},redirect_dir=on,metacopy=on" \
+               "$STAGING" 2>/dev/null; then
+                log "composefs mounted"
+                COMPOSEFS_MOUNTED=1
+            else
+                log "composefs overlay failed, using bind-mount"
+                umount "$CFS_MNT" 2>/dev/null || true
+                rmdir  "$CFS_MNT" 2>/dev/null || true
+            fi
+        else
+            log "erofs mount failed, using bind-mount"
+            rmdir "$CFS_MNT" 2>/dev/null || true
+        fi
+    else
+        log "erofs unavailable, using bind-mount"
+    fi
+fi
+if [ "$COMPOSEFS_MOUNTED" -eq 0 ]; then
+    mkdir -p "$STAGING"
+    if ! mount --bind "$DEPLOY" "$STAGING"; then
+        err "deployment bind-mount FAILED"
+        exit 1
+    fi
+    log "bind-mounted deployment"
 fi
 
 # /etc: same technique real ostree-prepare-root uses — bind-mount it onto
@@ -85,6 +116,18 @@ if [ -d "$VAR_SRC" ]; then
     fi
 else
     err "var source $VAR_SRC missing (continuing)"
+fi
+
+# /ostree: libostree opens ostree/lock and ostree/repo relative to the sysroot
+# root fd (/), not relative to /sysroot. Bind-mount the physical root's ostree/
+# directory into the deployment so that /ostree/ is accessible after switch_root.
+if [ -d "${SYSROOT}/ostree" ]; then
+    mkdir -p "$STAGING/ostree"
+    if mount --bind "${SYSROOT}/ostree" "$STAGING/ostree"; then
+        log "ostree bind-mounted"
+    else
+        err "ostree bind-mount failed (continuing)"
+    fi
 fi
 
 # Move the fully-assembled staging tree onto /sysroot in one atomic step.
