@@ -254,7 +254,10 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# DEBUG: add testuser:test with passwordless sudo access for testing.  Remove in production.
-RUN useradd -m -s /bin/bash testuser \
-    && echo 'testuser ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
-RUN echo 'testuser:test' | chpasswd
+# Setup a SSH server & enable it to start on boot. SSH key injection is handled by bootc
+RUN apt-get update && apt-get install -y openssh-server \
+    && mkdir -p /var/run/sshd \
+    && echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config \
+    && systemctl enable ssh \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
