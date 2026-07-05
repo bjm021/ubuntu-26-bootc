@@ -109,7 +109,13 @@ re-applies the ostree hook every time it runs.
   installed and aliased to the `targeted` path osbuild expects.
 - **`/usr/lib/ostree/prepare-root.conf`**: Ubuntu's `ostree` package doesn't
   ship one; `bootc install` requires it. `composefs` is set to `enabled=no`
-  to skip EROFS image generation (faster deployment checkout).
+  because Ubuntu 26.04's stock kernel has overlay compiled without
+  `CONFIG_OVERLAY_FS_METACOPY`, which composefs requires (`erofs` itself loads
+  fine). The bind-mount deployment path is the original ostree approach and
+  fully supported by bootc — composefs is an optimization (fs-verity integrity,
+  faster checkout) but not required for correctness. A kernel bug should be
+  filed with Ubuntu to enable `CONFIG_OVERLAY_FS_METACOPY`; once that lands,
+  flipping to `enabled=yes` here would give composefs for free.
 - **`/etc/containers/policy.json`**: skopeo (used by bootc's image proxy) exits
   immediately without a policy file.
 - **`network-manager` + `/etc/NetworkManager/conf.d/10-plugins.conf`**:
@@ -175,7 +181,7 @@ you need to add an insecure entry on each deployed machine:
 cat >> /etc/containers/registries.conf << 'EOF'
 
 [[registry]]
-location = "192.168.x.x:5000"
+location = "192.168.1.15:5000"
 insecure = true
 EOF
 ```
