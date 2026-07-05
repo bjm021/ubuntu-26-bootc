@@ -1,9 +1,13 @@
 # bootc/ubuntu-26
 
 A [bootc](https://github.com/bootc-dev/bootc) image built on **Ubuntu 26.04**,
-assembled from scratch. No community Ubuntu bootc base image exists yet, so
-this handles all the plumbing normally provided by a distro's first-class bootc
-support.
+assembled from scratch. The one community Ubuntu bootc project,
+[bootcrew/ubuntu-bootc](https://github.com/bootcrew/ubuntu-bootc), is now
+archived (merged into `bootcrew/mono`) and only ever covered building and
+booting once — it doesn't handle OTA upgrades, `ostree-finalize-staged`, or
+the NetworkManager/initramfs plumbing a real deployment needs. This image
+handles all of that, since no distro-provided first-class bootc support
+exists for Ubuntu.
 
 ## Files
 
