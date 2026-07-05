@@ -1,0 +1,17 @@
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+*.o
+*.so
+
+# Container/image output
+*.tar
+*.oci
+
+# Local environment overrides
+.env

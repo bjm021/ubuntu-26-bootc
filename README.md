@@ -175,7 +175,7 @@ you need to add an insecure entry on each deployed machine:
 cat >> /etc/containers/registries.conf << 'EOF'
 
 [[registry]]
-location = "192.168.1.15:5000"
+location = "192.168.x.x:5000"
 insecure = true
 EOF
 ```
