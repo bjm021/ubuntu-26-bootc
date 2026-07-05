@@ -1,4 +1,4 @@
-# ubuntu-26-bootc
+# bootc/ubuntu-26
 
 A [bootc](https://github.com/bootc-dev/bootc) image built on **Ubuntu 26.04**,
 assembled from scratch. The one community Ubuntu bootc project,
@@ -37,14 +37,50 @@ exists for Ubuntu.
   `src/switchroot/ostree-prepare-root.c` (verified against its source). It
   reads `ostree=` from the kernel command line, resolves the deployment
   symlink under `/sysroot`, then assembles the new root at a temporary
-  `/sysroot.tmp` mountpoint: bind-mounts the deployment there, bind-mounts
-  `/etc` onto itself (writable) and `/usr` onto itself then remounts it
-  read-only — Ubuntu is usr-merged, so this one directory covers effectively
-  the whole OS payload, same as Fedora/CoreOS — and bind-mounts the
-  persistent stateroot `/var` in. Only once all of that is assembled does it
-  `mount --move` the staging tree onto `/sysroot` so
-  `initrd-switch-root.service` pivots into the correct, now-immutable ostree
-  root. Progress is logged to `/dev/kmsg`.
+  `/sysroot.tmp` mountpoint.
+
+  **`/run/ostree-booted` GVariant write**: immediately after resolving the
+  deployment path (before any mounts), the script writes `/run/ostree-booted`
+  as a proper GVariant `a{sv}` binary dict containing one entry:
+  `{"backing-root-device-inode": <(deploy_dev, deploy_ino)>}` where
+  `(deploy_dev, deploy_ino)` are the result of `stat` on the deployment
+  directory itself. libostree 2025.x reads this file (via `ot_variant_read_fd`
+  with `G_VARIANT_TYPE_VARDICT`) and compares the stored `(dev, ino)` against
+  `stat(deployment_dfd)` for each known deployment to determine which one is
+  booted. Without this file (or with an empty one, as `tmpfiles.d`'s `f` type
+  would produce), the key lookup fails and libostree falls back to comparing
+  `stat("/")` against deployment dirs. That fallback works with a plain
+  bind-mount (where `stat("/")` returns the same btrfs device as the
+  deployment directory), but fails with composefs (where `stat("/")` returns
+  the overlay device, which never matches). The `/run` tmpfs is preserved by
+  systemd across `switch_root`, so this file is accessible when `bootc status`
+  runs in the booted system.
+
+  **Root assembly**: when the deployment has a `.ostree.cfs` erofs image
+  (composefs mode), the script mounts it via `loop`+`erofs` and layers an
+  overlay on top with `lowerdir=<cfs-mount>::<objects>,upperdir=<root-transient>`.
+  This is the composefs arrangement libostree expects. When the `.cfs` file is
+  absent or any required kernel primitive (erofs, loop, overlay metacopy) is
+  unavailable, it falls back to a plain bind-mount of the deployment directory.
+
+  **Per-directory mounts** (both composefs and bind-mount modes):
+  - `/etc`: writable overlay in composefs mode (`lowerdir=<deploy>/etc`,
+    `upperdir=<stateroot>/etc`) so systemd can create `/etc/machine-id` and
+    apply stateful changes; plain bind-mount of itself in bind-mount mode.
+  - `/root`: writable overlay in composefs mode (`lowerdir=<deploy>/root`,
+    `upperdir=<stateroot>/var/roothome`) so that SSH `authorized_keys` written
+    by `bootc install` into the physical deployment `/root` remains visible
+    at runtime (the erofs image is baked before install writes the key, so
+    it would otherwise be invisible through composefs).
+  - `/usr`: bind-mounted then remounted read-only — Ubuntu is usr-merged, so
+    this single directory covers effectively the whole OS payload.
+  - `/var`: bind-mounted from the persistent stateroot `var/` directory.
+  - `/ostree`: bind-mounted from the physical sysroot so libostree can open
+    `ostree/lock` and `ostree/repo` relative to `/` after switch_root.
+
+  Only once all of that is assembled does the script `mount --move` the
+  staging tree onto `/sysroot` so `initrd-switch-root.service` pivots into
+  the correct, now-immutable ostree root. Progress is logged to `/dev/kmsg`.
 
   The staging step matters: an earlier version bind-mounted the deployment
   directly over `/sysroot`, and separately bind-mounted persistent `/var`
@@ -108,14 +144,35 @@ re-applies the ostree hook every time it runs.
   exist at build time so `setfiles` doesn't crash. `selinux-policy-default` is
   installed and aliased to the `targeted` path osbuild expects.
 - **`/usr/lib/ostree/prepare-root.conf`**: Ubuntu's `ostree` package doesn't
-  ship one; `bootc install` requires it. `composefs` is set to `enabled=no`
-  because Ubuntu 26.04's stock kernel has overlay compiled without
-  `CONFIG_OVERLAY_FS_METACOPY`, which composefs requires (`erofs` itself loads
-  fine). The bind-mount deployment path is the original ostree approach and
-  fully supported by bootc — composefs is an optimization (fs-verity integrity,
-  faster checkout) but not required for correctness. A kernel bug should be
-  filed with Ubuntu to enable `CONFIG_OVERLAY_FS_METACOPY`; once that lands,
-  flipping to `enabled=yes` here would give composefs for free.
+  ship one; `bootc install` requires it. `composefs` is set to `enabled=yes`.
+  The stock kernel ships `overlay` without metacopy enabled by default, but
+  metacopy is a module parameter — `/etc/modprobe.d/overlay-metacopy.conf`
+  sets `options overlay metacopy=1` and is written before the initramfs build
+  so dracut includes it. This gives full composefs support (erofs lower layer +
+  overlay with metacopy/redirect_dir) without a custom kernel. Three
+  composefs-specific issues required workarounds in `ostree-pivot.sh`:
+  1. *`/etc` read-only*: the composefs overlay has no `upperdir`, so `/etc`
+     would otherwise be read-only and systemd could not create
+     `/etc/machine-id`. `ostree-pivot.sh` mounts a writable overlay on
+     `${STAGING}/etc` using the stateroot's `ostree/deploy/OSNAME/etc` as the
+     upperdir — exactly what the real `ostree-prepare-root` binary does.
+  2. *`authorized_keys` invisible*: `bootc install` writes SSH keys into the
+     physical deployment `/root` after the erofs image is baked, so they are
+     not visible through composefs at runtime. `ostree-pivot.sh` mounts a
+     writable overlay on `${STAGING}/root` (`lowerdir=<deploy>/root`,
+     `upperdir=<stateroot>/var/roothome`) to expose the physical `/root` and
+     keep it persistent and writable.
+  3. *`bootc status` fails with "bootloader entry not found"*: when composefs
+     is active, `stat("/")` returns the overlay device number, not the btrfs
+     device of the deployment directory. libostree 2025.x normally identifies
+     the booted deployment by reading `(dev, ino)` from `/run/ostree-booted`
+     (a GVariant `a{sv}` dict), comparing it against `stat(deployment_dfd)`.
+     If the file is missing or empty (as `tmpfiles.d`'s `f` type would
+     produce), it falls back to `stat("/")` — which fails to match under
+     composefs. `ostree-pivot.sh` writes the correct 55-byte GVariant
+     `a{sv}` binary to `/run/ostree-booted` during early boot so libostree
+     can always find the booted deployment regardless of the root filesystem
+     type.
 - **`/etc/containers/policy.json`**: skopeo (used by bootc's image proxy) exits
   immediately without a policy file.
 - **`network-manager` + `/etc/NetworkManager/conf.d/10-plugins.conf`**:

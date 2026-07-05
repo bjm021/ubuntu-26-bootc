@@ -83,6 +83,13 @@ RUN apt-get update && apt-get install -y \
         iputils-ping \
         network-manager \
         bubblewrap \
+        ca-certificates \
+        systemd-resolved \
+        systemd-timesyncd \
+        locales \
+        tzdata \
+        logrotate \
+        procps \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -116,7 +123,10 @@ RUN apt-get update && apt-get install -y \
 RUN mkdir -p /etc/NetworkManager/conf.d \
     && printf '[main]\nplugins=keyfile\n\n[keyfile]\nunmanaged-devices=\n' \
          > /etc/NetworkManager/conf.d/10-plugins.conf
-RUN systemctl enable NetworkManager
+RUN systemctl enable NetworkManager \
+    && systemctl enable systemd-resolved \
+    && systemctl enable systemd-timesyncd \
+    && systemctl mask systemd-firstboot.service
 
 # bootc-image-builder uses osbuild which hardcodes the Fedora/RHEL SELinux path
 # (etc/selinux/targeted/contexts/files/file_contexts) and crashes if it's absent.
@@ -179,7 +189,7 @@ RUN mkdir -p /ostree
 # bootc install checks for ostree/prepare-root.conf; Ubuntu's ostree package
 # doesn't ship it, so create a minimal one manually.
 RUN mkdir -p /usr/lib/ostree \
-    && printf '[composefs]\nenabled=no\n' > /usr/lib/ostree/prepare-root.conf
+    && printf '[composefs]\nenabled=yes\n' > /usr/lib/ostree/prepare-root.conf
 
 # /run/ostree-booted must exist on the live system so that bootc, ostree CLI,
 # and libostree recognise this as an ostree-booted deployment.  The real
@@ -291,6 +301,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends cpio \
 # initramfs.img.
 RUN echo 'force_drivers+=" btrfs erofs "' > /etc/dracut.conf.d/btrfs.conf
 
+RUN printf 'options overlay metacopy=1\n' > /etc/modprobe.d/overlay-metacopy.conf
+
 COPY build-initramfs.sh /usr/local/sbin/bootc-build-initramfs.sh
 RUN chmod +x /usr/local/sbin/bootc-build-initramfs.sh \
     && /usr/local/sbin/bootc-build-initramfs.sh
@@ -359,3 +371,12 @@ RUN apt-get update && apt-get install -y openssh-server \
     && systemctl enable ssh \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# bootc install --root-ssh-authorized-keys writes into the physical deployment
+# /root/.ssh/authorized_keys after the composefs erofs is already baked, so
+# the key is invisible through composefs at runtime. ostree-pivot.sh mounts a
+# writable overlay on /root (lowerdir=deploy/root, upperdir=var/roothome) so
+# the key is visible and /root stays writable and persistent across upgrades.
+# Ensure the stateroot directory exists at first boot as a safety net.
+RUN printf 'd /var/roothome 0700 root root -\n' \
+         > /usr/lib/tmpfiles.d/root-home.conf
