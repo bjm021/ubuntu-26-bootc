@@ -1,4 +1,4 @@
-# bootc/ubuntu-26
+# ubuntu-26-bootc
 
 A [bootc](https://github.com/bootc-dev/bootc) image built on **Ubuntu 26.04**,
 assembled from scratch. The one community Ubuntu bootc project,
