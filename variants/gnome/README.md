@@ -8,6 +8,15 @@ This image is an example of how to extend `ubuntu-26-bootc` with additional
 software. The same pattern applies further — use this image as your `FROM` base
 if you need GNOME plus extra packages or configuration.
 
+## Build arguments
+
+| Argument | Default | Description |
+|---|---|---|
+| `LANG` | `de_DE.UTF-8` | System locale |
+| `KBD_LAYOUT` | `de` | X/Wayland keyboard layout |
+| `UBUNTU_USER_PASSWORD` | `ubuntu` | Password for the `ubuntu` user |
+| `REMOVE_UBUNTU_USER` | `false` | Set to `true` to delete the `ubuntu` user entirely |
+
 ## OTA updates (`bootc upgrade`)
 
 `bootc upgrade` works on a running system from any terminal. However:

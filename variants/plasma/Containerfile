@@ -1,0 +1,136 @@
+FROM ghcr.io/bjm021/ubuntu-26-bootc:latest
+
+ARG LANG=de_DE.UTF-8
+ARG KBD_LAYOUT=de
+ARG UBUNTU_USER_PASSWORD=ubuntu
+ARG REMOVE_UBUNTU_USER=false
+
+# 0. Setup needed environment from base image
+# Add locales
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends locales && \
+    locale-gen $LANG && \
+    update-locale LANG=$LANG && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set keyboard layout
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends console-setup && \
+    sed -i "s/XKBLAYOUT=\".*\"/XKBLAYOUT=\"$KBD_LAYOUT\"/" /etc/default/keyboard && \
+    dpkg-reconfigure -f noninteractive keyboard-configuration && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 1. Install KDE Plasma and related packages (plasma-desktop, sddm, konsole, dolphin, etc.)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        plasma-desktop \
+        plasma-session-wayland \
+        konsole \
+        dolphin \
+        bash \
+        polkit-kde-agent-1 \
+        kde-cli-tools \
+        xdg-desktop-portal-kde \
+        kio-extras \
+        appstream \
+        drkonqi && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 2. User experience and utilities
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        systemsettings \
+        ark \
+        flatpak \
+        gwenview \
+        kate \
+        okular \
+        kde-spectacle \
+        yakuake \
+        plasma-discover \
+        plasma-discover-backend-flatpak \
+        plasma-nm \
+        plasma-pa \
+        plasma-thunderbolt \
+        breeze \
+        breeze-icon-theme \
+        breeze-cursor-theme \
+        fonts-noto-color-emoji \
+        kinfocenter \
+        kmenuedit \
+        kscreen && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Seed Flathub as a system remote via /etc so it's available on first boot
+RUN mkdir -p /etc/flatpak/remotes.d && \
+    curl -o /etc/flatpak/remotes.d/flathub.flatpakrepo \
+        https://dl.flathub.org/repo/flathub.flatpakrepo
+
+# Add Mozilla ppa to prevent the firefox snap installation and install firefox from the ppa
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    printf 'Package: *\nPin: release o=LP-PPA-mozillateam\nPin-Priority: 1001\n' \
+    > /etc/apt/preferences.d/mozilla-firefox && \
+    add-apt-repository -y ppa:mozillateam/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends firefox && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 3. Greeter and display manager
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        sddm \
+        sddm-theme-breeze \
+        xserver-xorg && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 4. Enable SDDM as the default display manager
+RUN systemctl enable sddm
+
+# 5. Set the default target to graphical
+RUN systemctl set-default graphical.target
+
+#6 . Video drivers (libvirt & intel) (change here if you want to use a different driver)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libgl1-mesa-dri \
+        mesa-vulkan-drivers \
+        mesa-utils && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 7. Set KDE Keyboard Layout Settings
+RUN mkdir -p /etc/xdg && printf '[Layout]\nLayoutList=%s\nModel=pc104\nUse=true\n' "$KBD_LAYOUT" \
+    > /etc/xdg/kxkbrc
+
+# 8. Workaround: Ubuntu 26.04 libAppStreamQt crashes in Pool::loadFinished when the system
+# backend loads. Skip it — system package management is meaningless on an ostree image.
+RUN sed -i 's|^Exec=plasma-discover|Exec=plasma-discover --backends flatpak-backend|' \
+    /usr/share/applications/org.kde.discover.desktop
+
+# 9. Install VSCode
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends wget gpg && \
+    wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > /usr/share/keyrings/packages.microsoft.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" > /etc/apt/sources.list.d/vscode.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends code && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 10. Cleanup and finalization
+
+# Remove the default ubuntu user if specified
+RUN if [ "$REMOVE_UBUNTU_USER" = "true" ]; then \
+        deluser --remove-home ubuntu; \
+    fi
+# If not removing the ubuntu user, set its password
+RUN if [ "$REMOVE_UBUNTU_USER" = "false" ]; then \
+        echo "ubuntu:$UBUNTU_USER_PASSWORD" | chpasswd; \
+    fi
