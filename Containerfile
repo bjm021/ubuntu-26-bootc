@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-RUN git clone https://github.com/bootc-dev/bootc.git /bootc
+RUN git clone --branch v1.16.3 --depth 1 https://github.com/bootc-dev/bootc.git /bootc
 WORKDIR /bootc
 # Release the sysroot lock before triggering reboot so ostree finalize-staged
 # can acquire it. With --apply, bootc holds the lock while blocking on
@@ -51,7 +51,7 @@ RUN cargo build --release
 
 # bootupd manages the EFI boot partition on ostree-based systems.
 # bootc requires it at install time; it's not in Ubuntu's repos so we build it.
-RUN git clone https://github.com/coreos/bootupd.git /bootupd
+RUN git clone --branch v0.2.35 --depth 1 https://github.com/coreos/bootupd.git /bootupd
 WORKDIR /bootupd
 RUN cargo build --release
 
