@@ -1,0 +1,72 @@
+FROM ghcr.io/bjm021/ubuntu-26-bootc:latest
+
+ARG LANG=de_DE.UTF-8
+ARG KBD_LAYOUT=de
+ARG UBUNTU_USER_PASSWORD=ubuntu
+ARG REMOVE_UBUNTU_USER=false
+
+# 0. Setup needed environment from base image
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends locales && \
+    locale-gen $LANG && \
+    update-locale LANG=$LANG && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 1. Set keyboard layout
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends console-setup && \
+    sed -i "s/XKBLAYOUT=\".*\"/XKBLAYOUT=\"$KBD_LAYOUT\"/" /etc/default/keyboard && \
+    dpkg-reconfigure -f noninteractive keyboard-configuration && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 2. Add Mozilla PPA so that the firefox recommendation in ubuntu-desktop-minimal
+# resolves to the deb package instead of the snap. Pin snapd to -1 so it is
+# never installed even as a recommended dependency.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    printf 'Package: *\nPin: release o=LP-PPA-mozillateam\nPin-Priority: 1001\n' \
+        > /etc/apt/preferences.d/mozilla-firefox && \
+    printf 'Package: snapd\nPin: release *\nPin-Priority: -1\n' \
+        > /etc/apt/preferences.d/no-snapd && \
+    add-apt-repository -y ppa:mozillateam/ppa && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 3. Install ubuntu-desktop-minimal with all recommends. snapd is excluded by
+# the pin above; firefox resolves to the Mozilla PPA deb.
+RUN apt-get update && \
+    apt-get install -y ubuntu-desktop-minimal && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 4. Install additional packages for user experience and utilities
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ptyxis \
+        bat \
+        curl \
+        git && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 5. Enable GDM and set graphical target
+RUN systemctl enable gdm3
+RUN systemctl set-default graphical.target
+
+# 6. Video drivers (virtio/intel; swap mesa-vulkan-drivers for nvidia if needed)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libgl1-mesa-dri \
+        mesa-vulkan-drivers \
+        mesa-utils && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 7. Cleanup and finalization
+RUN if [ "$REMOVE_UBUNTU_USER" = "true" ]; then \
+        deluser --remove-home ubuntu; \
+    else \
+        echo "ubuntu:$UBUNTU_USER_PASSWORD" | chpasswd; \
+    fi
