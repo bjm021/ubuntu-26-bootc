@@ -9,6 +9,8 @@ the NetworkManager/initramfs plumbing a real deployment needs. This image
 handles all of that, since no distro-provided first-class bootc support
 exists for Ubuntu.
 
+![Ubuntu 26 bootc GNOME variant](https://cdn.bjmsw.net/img/ubuntu-26-bootc.png)
+
 ## Files
 
 - **`Containerfile`** — two-stage build.
